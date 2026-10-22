@@ -1,46 +1,74 @@
-using System.Diagnostics;
+using System.Text;
 using System.Text.Json;
+using CodexDockUsage.Models;
+using CodexDockUsage.Services;
 
-var exe = args.Length > 0 ? args[0] : "codex";
-var start = new ProcessStartInfo(exe, "app-server --listen stdio://")
+Console.OutputEncoding = Encoding.UTF8;
+
+string? exeOverride = null;
+bool printRawJson = true;
+
+foreach (var arg in args)
 {
-    RedirectStandardInput = true, RedirectStandardOutput = true,
-    RedirectStandardError = true, UseShellExecute = false,
-    CreateNoWindow = true
-};
-using var process = new Process { StartInfo = start };
-if (!process.Start()) throw new Exception("Cannot start Codex app-server");
+    if (string.Equals(arg, "--no-raw", StringComparison.OrdinalIgnoreCase))
+    {
+        printRawJson = false;
+    }
+    else if (!arg.StartsWith('-'))
+    {
+        exeOverride = arg;
+    }
+}
+
+var resolvedExe = CodexAppServerClient.FindCodexExecutable(exeOverride);
+Console.WriteLine($"[Probe] 使用 Codex 執行檔: {resolvedExe}");
+
 using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
 var ct = timeout.Token;
-async Task<JsonElement> Request(int id, string method, object? parameters = null)
-{
-    await process.StandardInput.WriteLineAsync(JsonSerializer.Serialize(new { id, method, @params = parameters }));
-    await process.StandardInput.FlushAsync();
-    while (true)
-    {
-        var line = await process.StandardOutput.ReadLineAsync(ct) ?? throw new EndOfStreamException("App server stopped");
-        using var doc = JsonDocument.Parse(line);
-        var root = doc.RootElement;
-        if (!root.TryGetProperty("id", out var responseId) || responseId.ValueKind != JsonValueKind.Number || responseId.GetInt32() != id) continue;
-        if (root.TryGetProperty("error", out var error)) throw new InvalidOperationException(error.ToString());
-        return root.GetProperty("result").Clone();
-    }
-}
+
+await using var client = new CodexAppServerClient(exeOverride);
+await client.EnsureInitializedAsync(ct);
+
+JsonElement? rateLimits = null;
+JsonElement? tokenUsage = null;
+string? errorMessage = null;
+
 try
 {
-    await Request(1, "initialize", new { clientInfo = new { name = "codex_dock_usage", title = "Codex Dock Usage", version = "0.1.0" } });
-    await process.StandardInput.WriteLineAsync("{\"method\":\"initialized\",\"params\":{}}");
-    await process.StandardInput.FlushAsync();
-    var limits = await Request(2, "account/rateLimits/read");
-    Console.WriteLine("RATE LIMITS:\n" + JsonSerializer.Serialize(limits, new JsonSerializerOptions { WriteIndented = true }));
-    try
+    rateLimits = await client.ReadRateLimitsAsync(ct);
+    if (printRawJson && rateLimits is { } rl)
     {
-        var usage = await Request(3, "account/usage/read");
-        Console.WriteLine("TOKEN USAGE:\n" + JsonSerializer.Serialize(usage, new JsonSerializerOptions { WriteIndented = true }));
+        Console.WriteLine("\n=== RATE LIMITS (raw JSON) ===");
+        Console.WriteLine(rl.GetRawText());
     }
-    catch (Exception ex) { Console.Error.WriteLine("Token usage unavailable: " + ex.Message); }
 }
-finally
+catch (Exception ex)
 {
-    if (!process.HasExited) process.Kill(entireProcessTree: true);
+    errorMessage = $"讀取額度失敗: {ex.Message}";
+    Console.Error.WriteLine(errorMessage);
 }
+
+try
+{
+    tokenUsage = await client.ReadTokenUsageAsync(ct);
+    if (printRawJson && tokenUsage is { } tu)
+    {
+        Console.WriteLine("\n=== TOKEN USAGE (raw JSON) ===");
+        Console.WriteLine(tu.GetRawText());
+    }
+}
+catch (Exception ex)
+{
+    var msg = $"讀取 Token 統計失敗: {ex.Message}";
+    errorMessage = errorMessage is null ? msg : $"{errorMessage} | {msg}";
+    Console.Error.WriteLine(msg);
+}
+
+var dashboard = UsageParser.ParseDashboard(rateLimits, tokenUsage, DateTimeOffset.Now, errorMessage);
+
+Console.WriteLine("\n=== DOCK BAND 預覽 ===");
+Console.WriteLine($"Title   : {dashboard.FormatDockTitle()}");
+Console.WriteLine($"Subtitle: {dashboard.FormatDockSubtitle()}");
+
+Console.WriteLine("\n=== 展開面板 (IContentPage Markdown) 預覽 ===");
+Console.WriteLine(dashboard.ToMarkdown());
