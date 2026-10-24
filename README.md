@@ -6,6 +6,16 @@
 
 ---
 
+## 畫面預覽
+
+### 1. PowerToys Dock 常駐條帶（支援懸浮提示）
+![Dock 常駐預覽](./Screenshot/dock-demo.png)
+
+### 2. 點擊 Dock 展開詳細監控面板
+![詳細監控面板](./Screenshot/dock-panel-demo.png)
+
+---
+
 ## 官方介面支援對應
 
 | 功能 | 官方介面 |
